@@ -118,6 +118,8 @@ export class GameRenderer {
   private readonly rings: EffectRing[] = [];
   private readonly glowTexture: THREE.CanvasTexture;
   private readonly previewGroup = new THREE.Group();
+  private readonly tutorialMarker = new THREE.Group();
+  private readonly tutorialOriginMarker = new THREE.Group();
   private readonly selectionRing: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
   private readonly resizeObserver: ResizeObserver;
   private readonly reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -233,6 +235,7 @@ export class GameRenderer {
     this.world.add(this.pickPlane);
 
     this.createPreview();
+    this.createTutorialMarkers();
     this.selectionRing = new THREE.Mesh(
       new THREE.RingGeometry(0.43, 0.5, 32),
       new THREE.MeshBasicMaterial({
@@ -312,6 +315,19 @@ export class GameRenderer {
     }
   }
 
+  setTutorialTarget(target: GridCoord | null, origin: GridCoord | null): void {
+    this.tutorialMarker.visible = target !== null;
+    this.tutorialOriginMarker.visible = origin !== null;
+    if (target) {
+      const position = cellToWorld(target, 0.22);
+      this.tutorialMarker.position.set(position.x, position.y, position.z);
+    }
+    if (origin) {
+      const position = cellToWorld(origin, 0.2);
+      this.tutorialOriginMarker.position.set(position.x, position.y, position.z);
+    }
+  }
+
   handleEvent(event: GameEvent): void {
     if (event.type === "build") {
       const position = cellToWorld(event.cell, 0.35);
@@ -369,6 +385,7 @@ export class GameRenderer {
     this.updateGates(state, now, delta);
     this.updateEffects(delta);
     this.updatePreview(now);
+    this.updateTutorialMarkers(now);
     this.updateSelection(state, now);
 
     if (this.topologyVersion !== state.topologyVersion) {
@@ -831,6 +848,57 @@ export class GameRenderer {
     this.world.add(this.previewGroup);
   }
 
+  private createTutorialMarkers(): void {
+    const targetPlate = new THREE.Mesh(
+      new THREE.BoxGeometry(CELL_SIZE * 0.82, 0.045, CELL_SIZE * 0.82),
+      new THREE.MeshBasicMaterial({
+        color: COLORS.cyan,
+        transparent: true,
+        opacity: 0.12,
+        depthWrite: false
+      })
+    );
+    const targetFrame = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(CELL_SIZE * 0.84, 0.06, CELL_SIZE * 0.84)),
+      new THREE.LineBasicMaterial({
+        color: COLORS.cyan,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false
+      })
+    );
+    const arrow = new THREE.Mesh(
+      new THREE.ConeGeometry(0.13, 0.3, 4),
+      new THREE.MeshBasicMaterial({
+        color: COLORS.cyan,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false
+      })
+    );
+    arrow.position.y = 0.72;
+    arrow.rotation.z = Math.PI;
+    arrow.userData.tutorialArrow = true;
+    this.tutorialMarker.add(targetPlate, targetFrame, arrow);
+    this.tutorialMarker.visible = false;
+
+    const originRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.38, 0.45, 4),
+      new THREE.MeshBasicMaterial({
+        color: COLORS.neutral,
+        transparent: true,
+        opacity: 0.48,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      })
+    );
+    originRing.rotation.x = -Math.PI / 2;
+    originRing.rotation.z = Math.PI / 4;
+    this.tutorialOriginMarker.add(originRing);
+    this.tutorialOriginMarker.visible = false;
+    this.world.add(this.tutorialOriginMarker, this.tutorialMarker);
+  }
+
   private createGlowTexture(): THREE.CanvasTexture {
     const canvas = document.createElement("canvas");
     canvas.width = 128;
@@ -1170,7 +1238,7 @@ export class GameRenderer {
     for (const enemy of state.enemies) {
       let group = this.enemyGroups.get(enemy.id);
       if (!group) {
-        group = this.createEnemyGroup(enemy.kind);
+        group = this.createEnemyGroup(enemy.kind, enemy.training);
         group.scale.setScalar(0.03);
         this.enemyGroups.set(enemy.id, group);
         this.enemyLayer.add(group);
@@ -1197,8 +1265,14 @@ export class GameRenderer {
         bodyMaterial.emissive.setHex(COLORS.blue);
         bodyMaterial.emissiveIntensity = 0.48;
       } else {
-        bodyMaterial.emissive.setHex(enemy.kind === "boss" ? COLORS.red : 0x3c1715);
-        bodyMaterial.emissiveIntensity = enemy.kind === "boss" ? 0.5 : 0.18;
+        bodyMaterial.emissive.setHex(
+          enemy.training ? COLORS.yellow : enemy.kind === "boss" ? COLORS.red : 0x3c1715
+        );
+        bodyMaterial.emissiveIntensity = enemy.training
+          ? 0.5 + Math.sin(now * 5) * 0.12
+          : enemy.kind === "boss"
+            ? 0.5
+            : 0.18;
       }
       const healthFill = group.userData.healthFill as THREE.Mesh | undefined;
       const healthRoot = group.userData.healthRoot as THREE.Group | undefined;
@@ -1207,15 +1281,17 @@ export class GameRenderer {
         healthFill.scale.x = ratio;
         healthFill.position.x = -0.28 * (1 - ratio);
         healthRoot.quaternion.copy(this.camera.quaternion);
-        healthRoot.visible = ratio < 0.995 || enemy.kind === "boss";
+        healthRoot.visible = enemy.training || ratio < 0.995 || enemy.kind === "boss";
       }
     }
   }
 
-  private createEnemyGroup(kind: EnemyKind): THREE.Group {
+  private createEnemyGroup(kind: EnemyKind, training = false): THREE.Group {
     const group = new THREE.Group();
     const bodyColor =
-      kind === "armored"
+      training
+        ? 0x7d683c
+        : kind === "armored"
         ? 0x695047
         : kind === "disruptor"
           ? 0x664245
@@ -1224,8 +1300,8 @@ export class GameRenderer {
             : 0x8a433b;
     const material = new THREE.MeshStandardMaterial({
       color: bodyColor,
-      emissive: 0x3c1715,
-      emissiveIntensity: 0.18,
+      emissive: training ? COLORS.yellow : 0x3c1715,
+      emissiveIntensity: training ? 0.5 : 0.18,
       metalness: kind === "armored" || kind === "boss" ? 0.72 : 0.38,
       roughness: kind === "armored" ? 0.38 : 0.56
     });
@@ -1650,6 +1726,25 @@ export class GameRenderer {
     }
     this.previewGroup.visible = true;
     this.previewGroup.userData.valid = this.previewValid;
+  }
+
+  private updateTutorialMarkers(now: number): void {
+    if (!this.tutorialMarker.visible) {
+      return;
+    }
+    const motionTime = this.reducedMotion.matches ? 0 : now;
+    const pulse = 1 + Math.sin(motionTime * 4.8) * 0.055;
+    this.tutorialMarker.scale.setScalar(pulse);
+    const arrow = this.tutorialMarker.children.find(
+      (child) => child.userData.tutorialArrow
+    );
+    if (arrow) {
+      arrow.position.y = 0.72 + Math.sin(motionTime * 4.8) * 0.08;
+      arrow.rotation.y = motionTime * 0.8;
+    }
+    if (this.tutorialOriginMarker.visible) {
+      this.tutorialOriginMarker.rotation.y = motionTime * 0.45;
+    }
   }
 
   private updateSelection(state: GameState, now: number): void {

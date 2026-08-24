@@ -10,6 +10,50 @@ function advance(game: GameSimulation, seconds: number): void {
 }
 
 describe("game simulation", () => {
+  it("freezes the first wave until the guided network fires", () => {
+    const game = new GameSimulation(314);
+    game.start(314, true);
+
+    advance(game, 2);
+    expect(game.state.tutorialActive).toBe(true);
+    expect(game.state.tutorialStep).toBe(0);
+    expect(game.state.elapsed).toBe(0);
+    expect(game.state.enemies).toHaveLength(0);
+    expect(game.placeDevice("wire", { x: 6, y: 5 })).toBe(false);
+
+    expect(game.placeDevice("wire", { x: 4, y: 5 })).toBe(true);
+    expect(game.state.tutorialStep).toBe(1);
+    expect(game.placeDevice("wire", { x: 3, y: 5 })).toBe(true);
+    expect(game.state.tutorialStep).toBe(2);
+    expect(game.state.selectedTool).toBe("needle");
+    expect(game.placeDevice("needle", { x: 3, y: 6 })).toBe(true);
+    expect(game.state.tutorialStep).toBe(3);
+    expect(game.state.enemies.some((enemy) => enemy.training)).toBe(true);
+
+    advance(game, 3);
+
+    expect(game.state.tutorialActive).toBe(false);
+    expect(game.state.tutorialStep).toBe(4);
+    expect(game.state.elapsed).toBeGreaterThan(0);
+    expect(game.state.enemies.some((enemy) => enemy.training)).toBe(false);
+    expect(game.state.kills).toBe(0);
+    expect(game.state.score).toBe(0);
+  });
+
+  it("can skip the guided tutorial without advancing its frozen clock", () => {
+    const game = new GameSimulation(2718);
+    game.start(2718, true);
+
+    expect(game.skipTutorial()).toBe(true);
+    expect(game.skipTutorial()).toBe(false);
+    expect(game.state.tutorialActive).toBe(false);
+    expect(game.state.tutorialStep).toBe(4);
+    expect(game.state.elapsed).toBe(0);
+
+    advance(game, 0.5);
+    expect(game.state.elapsed).toBeGreaterThan(0);
+  });
+
   it("moves stored energy through a capacitor into a tower", () => {
     const game = new GameSimulation(1234);
     game.start(1234);

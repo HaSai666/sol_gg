@@ -15,6 +15,16 @@ export const CORE_CELL: GridCoord = { x: 5, y: 5 };
 export const WAVE_DURATION = 75;
 export const BOSS_DURATION_TARGET = 100;
 
+export const TUTORIAL_PLACEMENTS: ReadonlyArray<{
+  tool: "wire" | "needle";
+  cell: GridCoord;
+  origin: GridCoord;
+}> = [
+  { tool: "wire", cell: { x: 4, y: 5 }, origin: CORE_CELL },
+  { tool: "wire", cell: { x: 3, y: 5 }, origin: { x: 4, y: 5 } },
+  { tool: "needle", cell: { x: 3, y: 6 }, origin: { x: 3, y: 5 } }
+];
+
 export const DEVICE_COST: Record<DeviceKind, number> = {
   wire: 2,
   splitter: 8,

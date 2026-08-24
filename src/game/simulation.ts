@@ -5,10 +5,12 @@ import {
   GRID_HEIGHT,
   GRID_WIDTH,
   REWARDS,
+  TUTORIAL_PLACEMENTS,
   WAVE_DURATION,
   cellToWorld,
   lanePointAt,
-  rewardById
+  rewardById,
+  sameCell
 } from "./config";
 import {
   buildTopology,
@@ -42,6 +44,10 @@ type TowerKind = "needle" | "mortar" | "prism";
 const STARTING_UNLOCKS: DeviceKind[] = ["wire", "splitter", "capacitor", "needle"];
 const TOWER_KINDS = new Set<TowerKind>(["needle", "mortar", "prism"]);
 const FREQUENCIES: Frequency[] = ["red", "blue", "yellow"];
+const DEVICE_LABEL_FOR_TUTORIAL = {
+  wire: "导线",
+  needle: "针刺塔"
+} as const;
 
 function isTowerKind(kind: DeviceKind): kind is TowerKind {
   return TOWER_KINDS.has(kind as TowerKind);
@@ -78,7 +84,8 @@ function makeInitialState(seed: number): GameState {
     bossSpawned: false,
     activeLanes: [0],
     topologyVersion: 0,
-    tutorialStep: 0
+    tutorialActive: false,
+    tutorialStep: 4
   };
 }
 
@@ -114,12 +121,18 @@ export class GameSimulation {
     return () => this.listeners.delete(listener);
   }
 
-  start(seed = this.state.seed): void {
+  start(seed = this.state.seed, tutorial = false): void {
     this.reset(seed);
     this.state.phase = "running";
     this.state.phaseBeforePause = "running";
-    this.emit({ type: "wave", wave: 1, lanes: [...this.state.activeLanes] });
-    this.emit({ type: "tutorial", step: 0 });
+    this.state.tutorialActive = tutorial;
+    this.state.tutorialStep = tutorial ? 0 : 4;
+    if (tutorial) {
+      this.state.selectedTool = TUTORIAL_PLACEMENTS[0].tool;
+      this.emit({ type: "tutorial", step: 0 });
+    } else {
+      this.emit({ type: "wave", wave: 1, lanes: [...this.state.activeLanes] });
+    }
   }
 
   reset(seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0): void {
@@ -142,6 +155,14 @@ export class GameSimulation {
     }
 
     const dt = Math.min(delta, 0.1);
+    if (this.state.tutorialActive) {
+      this.updateDeviceCooldowns(dt);
+      this.updateNetwork(dt);
+      this.updateTowers();
+      this.updateProjectiles(dt);
+      return;
+    }
+
     this.state.elapsed += dt;
     this.state.buildPoints = Math.min(
       this.state.buildPointCap,
@@ -164,6 +185,18 @@ export class GameSimulation {
   }
 
   setTool(tool: BuildTool): void {
+    if (this.state.tutorialActive) {
+      const expected = TUTORIAL_PLACEMENTS[this.state.tutorialStep];
+      if (!expected || tool !== expected.tool) {
+        this.emit({
+          type: "invalid",
+          message: expected
+            ? `这一步请使用${DEVICE_LABEL_FOR_TUTORIAL[expected.tool]}`
+            : "先观察炮塔完成第一次开火"
+        });
+        return;
+      }
+    }
     this.state.selectedTool = tool;
     this.state.selectedDeviceId = null;
   }
@@ -176,6 +209,25 @@ export class GameSimulation {
     if (this.state.phase !== "running") {
       this.emit({ type: "invalid", message: "战斗暂停时不能搭建", cell });
       return false;
+    }
+
+    if (this.state.tutorialActive) {
+      const expected = TUTORIAL_PLACEMENTS[this.state.tutorialStep];
+      if (!expected) {
+        this.emit({ type: "invalid", message: "先观察炮塔完成第一次开火", cell });
+        return false;
+      }
+      if (kind !== expected.tool || !sameCell(cell, expected.cell)) {
+        this.emit({
+          type: "invalid",
+          message:
+            kind !== expected.tool
+              ? `这一步请使用${DEVICE_LABEL_FOR_TUTORIAL[expected.tool]}`
+              : "请放在战场中闪烁的高亮格",
+          cell
+        });
+        return false;
+      }
     }
 
     const id = this.nextDeviceId;
@@ -197,7 +249,7 @@ export class GameSimulation {
       bufferFrequency: "neutral",
       cooldown: 0,
       disabledUntil: 0,
-      offlineUntil: this.state.elapsed + 0.28,
+      offlineUntil: this.state.tutorialActive ? this.state.elapsed : this.state.elapsed + 0.28,
       targetId: null,
       previousFrequency: "neutral"
     };
@@ -209,13 +261,17 @@ export class GameSimulation {
     this.state.topologyVersion += 1;
     this.state.selectedDeviceId = device.id;
     this.emit({ type: "build", deviceId: id, kind, cell: { ...cell } });
-    this.advanceTutorialAfterBuild(kind);
+    this.advanceTutorialAfterBuild(kind, cell);
     return true;
   }
 
   moveDevice(deviceId: number, cell: GridCoord): boolean {
     if (this.state.phase !== "running") {
       this.emit({ type: "invalid", message: "战斗暂停时不能迁移装置", cell });
+      return false;
+    }
+    if (this.state.tutorialActive) {
+      this.emit({ type: "invalid", message: "完成教学后即可迁移装置", cell });
       return false;
     }
 
@@ -249,6 +305,10 @@ export class GameSimulation {
   removeAt(cell: GridCoord): boolean {
     if (this.state.phase !== "running") {
       this.emit({ type: "invalid", message: "战斗暂停时不能拆除", cell });
+      return false;
+    }
+    if (this.state.tutorialActive) {
+      this.emit({ type: "invalid", message: "完成教学后即可拆除装置", cell });
       return false;
     }
 
@@ -313,6 +373,10 @@ export class GameSimulation {
   }
 
   togglePause(): void {
+    if (this.state.tutorialActive) {
+      this.emit({ type: "invalid", message: "教学期间敌潮和计时已经冻结" });
+      return;
+    }
     if (this.state.phase === "running") {
       this.state.phaseBeforePause = "running";
       this.state.phase = "paused";
@@ -324,6 +388,9 @@ export class GameSimulation {
   }
 
   pauseForVisibility(): void {
+    if (this.state.tutorialActive) {
+      return;
+    }
     if (this.state.phase === "running") {
       this.state.phaseBeforePause = "running";
       this.state.phase = "paused";
@@ -372,6 +439,14 @@ export class GameSimulation {
     return findDeviceAt(this.state.devices, cell);
   }
 
+  skipTutorial(): boolean {
+    if (!this.state.tutorialActive) {
+      return false;
+    }
+    this.finishTutorial(true);
+    return true;
+  }
+
   debugGrantBuildPoints(amount = 120): void {
     this.state.buildPoints = Math.min(this.state.buildPointCap, this.state.buildPoints + amount);
   }
@@ -407,18 +482,63 @@ export class GameSimulation {
     }
   }
 
-  private advanceTutorialAfterBuild(kind: DeviceKind): void {
-    if (this.state.tutorialStep === 0 && kind === "wire") {
-      this.state.tutorialStep = 1;
-      this.emit({ type: "tutorial", step: 1 });
+  private advanceTutorialAfterBuild(kind: DeviceKind, cell: GridCoord): void {
+    if (!this.state.tutorialActive) {
+      return;
     }
-    if (
-      this.state.tutorialStep <= 1 &&
-      (kind === "needle" || kind === "mortar" || kind === "prism")
-    ) {
-      this.state.tutorialStep = 2;
-      this.emit({ type: "tutorial", step: 2 });
+    const expected = TUTORIAL_PLACEMENTS[this.state.tutorialStep];
+    if (!expected || kind !== expected.tool || !sameCell(cell, expected.cell)) {
+      return;
     }
+
+    this.state.tutorialStep += 1;
+    const next = TUTORIAL_PLACEMENTS[this.state.tutorialStep];
+    if (next) {
+      this.state.selectedTool = next.tool;
+    } else if (this.state.tutorialStep === 3) {
+      this.spawnTrainingTarget();
+    }
+    this.emit({ type: "tutorial", step: this.state.tutorialStep });
+  }
+
+  private spawnTrainingTarget(): void {
+    if (this.state.enemies.some((enemy) => enemy.training)) {
+      return;
+    }
+    this.state.enemies.push({
+      id: this.nextEnemyId,
+      kind: "armored",
+      lane: 0,
+      pathProgress: 0.67,
+      hp: 20,
+      maxHp: 20,
+      speed: 0,
+      coreDamage: 0,
+      reward: 0,
+      burnDps: 0,
+      burnTime: 0,
+      slowAmount: 0,
+      slowTime: 0,
+      jamTriggered: true,
+      spawnedAt: this.state.elapsed,
+      training: true
+    });
+    this.nextEnemyId += 1;
+  }
+
+  private finishTutorial(removeTrainingTarget: boolean): void {
+    this.state.tutorialActive = false;
+    this.state.tutorialStep = 4;
+    this.state.preWaveDelay = 5;
+    this.state.selectedTool = "wire";
+    if (removeTrainingTarget) {
+      this.state.enemies = this.state.enemies.filter((enemy) => !enemy.training);
+      this.state.projectiles = this.state.projectiles.filter((projectile) =>
+        this.state.enemies.some((enemy) => enemy.id === projectile.targetId)
+      );
+    }
+    this.emit({ type: "tutorial", step: 4 });
+    this.emit({ type: "wave", wave: 1, lanes: [...this.state.activeLanes] });
   }
 
   private updateDeviceCooldowns(dt: number): void {
@@ -673,9 +793,8 @@ export class GameSimulation {
         towerKind: tower.kind,
         frequency
       });
-      if (this.state.tutorialStep === 2) {
-        this.state.tutorialStep = 3;
-        this.emit({ type: "tutorial", step: 3 });
+      if (this.state.tutorialActive && this.state.tutorialStep === 3) {
+        this.finishTutorial(false);
       }
     }
   }
@@ -810,14 +929,17 @@ export class GameSimulation {
 
   private killEnemy(enemy: EnemyState): void {
     this.state.enemies = this.state.enemies.filter((entry) => entry.id !== enemy.id);
+    const position = lanePointAt(enemy.lane, enemy.pathProgress);
+    this.emit({ type: "kill", position, enemyKind: enemy.kind });
+    if (enemy.training) {
+      return;
+    }
     this.state.kills += 1;
     this.state.score += Math.round(enemy.maxHp + enemy.pathProgress * 50);
     this.state.buildPoints = Math.min(
       this.state.buildPointCap,
       this.state.buildPoints + enemy.reward
     );
-    const position = lanePointAt(enemy.lane, enemy.pathProgress);
-    this.emit({ type: "kill", position, enemyKind: enemy.kind });
     if (enemy.kind === "boss") {
       this.finishWin();
     }
@@ -826,6 +948,9 @@ export class GameSimulation {
   private updateEnemies(dt: number): void {
     for (const enemy of [...this.state.enemies]) {
       if (!this.state.enemies.some((entry) => entry.id === enemy.id)) {
+        continue;
+      }
+      if (enemy.training) {
         continue;
       }
       if (enemy.burnTime > 0) {
@@ -969,7 +1094,8 @@ export class GameSimulation {
       slowAmount: 0,
       slowTime: 0,
       jamTriggered: false,
-      spawnedAt: this.state.elapsed
+      spawnedAt: this.state.elapsed,
+      training: false
     };
     this.nextEnemyId += 1;
     this.state.enemies.push(enemy);

@@ -68,6 +68,7 @@ export interface EnemyState {
   slowTime: number;
   jamTriggered: boolean;
   spawnedAt: number;
+  training: boolean;
 }
 
 export interface ProjectileState {
@@ -153,6 +154,7 @@ export interface GameState {
   bossSpawned: boolean;
   activeLanes: number[];
   topologyVersion: number;
+  tutorialActive: boolean;
   tutorialStep: number;
 }
 

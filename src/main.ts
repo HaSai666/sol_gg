@@ -5,7 +5,8 @@ import {
   DEVICE_COST,
   DEVICE_LABEL,
   FREQUENCY_LABEL,
-  LANES
+  LANES,
+  TUTORIAL_PLACEMENTS
 } from "./game/config";
 import { validatePlacement } from "./game/network";
 import { GameSimulation } from "./game/simulation";
@@ -40,12 +41,33 @@ const TOOL_SHORTCUT: Record<DeviceKind, string> = {
   prism: "8"
 };
 
-const TUTORIAL_COPY = [
-  "从核心旁边开始，沿网格拖出一条导线。",
-  "继续延伸线路，在道路附近放置一座针刺塔。",
-  "脉冲正在赶往炮塔。观察它第一次开火。",
-  "线路已上线。入口变化时，及时把能量调向受威胁区域。"
-];
+const TUTORIAL_CONTENT = [
+  {
+    label: "教学 1 / 4",
+    title: "从核心接出导线",
+    copy: "按住中央发光核心，拖到左侧高亮格。敌潮和计时已冻结。"
+  },
+  {
+    label: "教学 2 / 4",
+    title: "把线路延伸到道路",
+    copy: "继续向左拖到新的高亮格。脉冲只会沿着相邻装置传递。"
+  },
+  {
+    label: "教学 3 / 4",
+    title: "在线路末端放置炮塔",
+    copy: "针刺塔已经自动选中。点击道路下方的高亮格完成接入。"
+  },
+  {
+    label: "教学 4 / 4",
+    title: "观察第一次开火",
+    copy: "训练目标不会伤害核心。等待能量进入炮塔并触发射击。"
+  },
+  {
+    label: "线路已上线",
+    title: "敌潮倒计时启动",
+    copy: "核心产生能量，导线负责输送，炮塔收到能量后自动攻击。"
+  }
+] as const;
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -119,8 +141,15 @@ app.innerHTML = `
     </div>
 
     <div class="tutorial-card" id="tutorial-card" aria-live="polite">
-      <span id="tutorial-step">入网指引</span>
-      <p id="tutorial-copy">${TUTORIAL_COPY[0]}</p>
+      <div class="tutorial-heading">
+        <span id="tutorial-step">${TUTORIAL_CONTENT[0].label}</span>
+        <button id="skip-tutorial-button" type="button">跳过教学</button>
+      </div>
+      <strong id="tutorial-title">${TUTORIAL_CONTENT[0].title}</strong>
+      <p id="tutorial-copy">${TUTORIAL_CONTENT[0].copy}</p>
+      <div class="tutorial-chain" aria-label="核心产生能量，导线输送能量，炮塔自动攻击">
+        <span>核心</span><i>产生</i><span>导线</span><i>输送</i><span>炮塔</span>
+      </div>
     </div>
 
     <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
@@ -150,7 +179,7 @@ app.innerHTML = `
             <span>开始游戏</span><kbd>Enter</kbd>
           </button>
           <button class="menu-action" id="start-help-button" type="button">
-            <span>作战教学</span><kbd>H</kbd>
+            <span>作战教学</span><kbd>T</kbd>
           </button>
           <button class="menu-action" id="menu-sound-button" type="button">
             <span>音效</span><em>开</em>
@@ -193,13 +222,24 @@ app.innerHTML = `
         <span>操作说明</span>
         <h2 id="help-title">快速上手</h2>
       </div>
+      <div class="help-power-loop" aria-label="核心产生能量，导线输送能量，炮塔自动攻击">
+        <div><strong>核心</strong><span>产生能量</span></div>
+        <i>→</i>
+        <div><strong>导线</strong><span>输送能量</span></div>
+        <i>→</i>
+        <div><strong>炮塔</strong><span>自动攻击</span></div>
+      </div>
+      <p class="help-rule">炮塔必须接在线路末端，并靠近敌人道路。没有能量的炮塔不会开火。</p>
       <div class="help-layout">
         <div><strong>拖拽</strong><p>选择导线后，从核心旁边沿网格拖动。</p></div>
         <div><strong>点击</strong><p>点击染色器或切换器，改变当前规则。</p></div>
         <div><strong>右键</strong><p>拆除装置并返还大部分建造点。</p></div>
         <div><strong>快捷键</strong><p>数字键选工具，空格暂停，M 迁移所选装置。</p></div>
       </div>
-      <button class="start-button" id="close-help-button" type="button">明白了</button>
+      <div class="help-actions">
+        <button class="start-button" id="close-help-button" type="button">明白了</button>
+        <button class="quiet-button" id="replay-tutorial-button" type="button">重玩教学</button>
+      </div>
     </section>
 
     <div class="boot-screen" id="boot-screen" aria-live="polite">
@@ -240,7 +280,10 @@ const threatBanner = mustElement<HTMLElement>("#threat-banner");
 const threatLabel = mustElement<HTMLElement>("#threat-label");
 const threatCopy = mustElement<HTMLElement>("#threat-copy");
 const tutorialCard = mustElement<HTMLElement>("#tutorial-card");
+const tutorialStep = mustElement<HTMLElement>("#tutorial-step");
+const tutorialTitle = mustElement<HTMLElement>("#tutorial-title");
 const tutorialCopy = mustElement<HTMLElement>("#tutorial-copy");
+const skipTutorialButton = mustElement<HTMLButtonElement>("#skip-tutorial-button");
 const toastStack = mustElement<HTMLElement>("#toast-stack");
 const inspector = mustElement<HTMLElement>("#inspector");
 const inspectorTitle = mustElement<HTMLElement>("#inspector-title");
@@ -250,6 +293,7 @@ const inspectorActions = mustElement<HTMLElement>("#inspector-actions");
 const startButton = mustElement<HTMLButtonElement>("#start-button");
 const hudSoundButton = mustElement<HTMLButtonElement>("#sound-button");
 const menuSoundButton = mustElement<HTMLButtonElement>("#menu-sound-button");
+const replayTutorialButton = mustElement<HTMLButtonElement>("#replay-tutorial-button");
 
 for (const kind of TOOL_ORDER) {
   const button = document.createElement("button");
@@ -331,10 +375,15 @@ function handleGameEvent(event: GameEvent): void {
   } else if (event.type === "core-hit") {
     showToast(`核心受到 ${event.amount} 点冲击`, "danger");
   } else if (event.type === "tutorial") {
-    tutorialCopy.textContent = TUTORIAL_COPY[event.step] ?? TUTORIAL_COPY[3];
+    const content = TUTORIAL_CONTENT[event.step] ?? TUTORIAL_CONTENT[4];
+    tutorialStep.textContent = content.label;
+    tutorialTitle.textContent = content.title;
+    tutorialCopy.textContent = content.copy;
+    skipTutorialButton.hidden = event.step >= 4;
     tutorialCard.classList.add("is-visible");
-    if (event.step === 3) {
-      window.setTimeout(() => tutorialCard.classList.remove("is-visible"), 6500);
+    if (event.step >= 4) {
+      persistTutorialComplete();
+      window.setTimeout(() => tutorialCard.classList.remove("is-visible"), 5200);
     }
   } else if (event.type === "win" || event.type === "lose") {
     persistBest(event.score);
@@ -362,8 +411,24 @@ function bestScore(): number {
   }
 }
 
-function beginRun(seed: number): void {
-  simulation.start(seed);
+function hasCompletedTutorial(): boolean {
+  try {
+    return localStorage.getItem("pulse-defense-tutorial-complete") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistTutorialComplete(): void {
+  try {
+    localStorage.setItem("pulse-defense-tutorial-complete", "1");
+  } catch {
+    // Tutorial completion only affects whether it is shown automatically.
+  }
+}
+
+function beginRun(seed: number, tutorial: boolean): void {
+  simulation.start(seed, tutorial);
   gameRenderer.setPresentationMode(false);
   startOverlay.classList.remove("is-visible", "is-departing");
   document.body.classList.remove("is-entering");
@@ -371,14 +436,14 @@ function beginRun(seed: number): void {
   isStarting = false;
   resultOverlay.classList.remove("is-visible");
   helpOverlay.classList.remove("is-visible");
-  tutorialCard.classList.add("is-visible");
+  tutorialCard.classList.toggle("is-visible", tutorial);
   movingDeviceId = null;
   rewardRenderKey = "";
   updateUi(true);
   gameRenderer.canvas.focus();
 }
 
-function startRun(useNewSeed = false): void {
+function startRun(useNewSeed = false, forceTutorial = false): void {
   if (isStarting) {
     return;
   }
@@ -386,9 +451,10 @@ function startRun(useNewSeed = false): void {
   const seed = useNewSeed
     ? (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0
     : simulation.state.seed;
+  const tutorial = forceTutorial || (!useNewSeed && !hasCompletedTutorial());
 
   if (!startOverlay.classList.contains("is-visible")) {
-    beginRun(seed);
+    beginRun(seed, tutorial);
     return;
   }
 
@@ -398,7 +464,7 @@ function startRun(useNewSeed = false): void {
   startOverlay.classList.add("is-departing");
   gameRenderer.setPresentationMode(false);
   const delay = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 720;
-  window.setTimeout(() => beginRun(seed), delay);
+  window.setTimeout(() => beginRun(seed, tutorial), delay);
 }
 
 function formatTime(seconds: number): string {
@@ -425,7 +491,9 @@ function updateUi(force = false): void {
     state.phase === "ready"
       ? "等待启动"
       : state.phase === "running"
-        ? simulation.topology.connected.size > 1
+        ? state.tutorialActive
+          ? `教学 ${Math.min(4, state.tutorialStep + 1)} / 4`
+          : simulation.topology.connected.size > 1
           ? `${simulation.topology.connected.size - 1} 个节点在线`
           : "核心等待接线"
         : state.phase === "paused"
@@ -434,8 +502,13 @@ function updateUi(force = false): void {
             ? "规则选择中"
             : "运行结束";
 
-  mustElement<HTMLButtonElement>("#pause-button").textContent =
-    state.phase === "paused" ? "继续" : "暂停";
+  const pauseButton = mustElement<HTMLButtonElement>("#pause-button");
+  pauseButton.textContent = state.tutorialActive
+    ? "已冻结"
+    : state.phase === "paused"
+      ? "继续"
+      : "暂停";
+  pauseButton.disabled = state.tutorialActive;
   pauseOverlay.classList.toggle("is-visible", state.phase === "paused");
   rewardOverlay.classList.toggle("is-visible", state.phase === "reward");
   resultOverlay.classList.toggle("is-visible", state.phase === "won" || state.phase === "lost");
@@ -450,17 +523,32 @@ function updateUi(force = false): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-tool]")) {
     const tool = button.dataset.tool as BuildTool;
     const unlocked = tool === "remove" || state.unlocks.has(tool);
-    button.disabled = !unlocked;
+    const expectedTutorialTool = TUTORIAL_PLACEMENTS[state.tutorialStep]?.tool;
+    const tutorialLocked = state.tutorialActive && tool !== expectedTutorialTool;
+    button.disabled = !unlocked || tutorialLocked;
     button.classList.toggle("is-locked", !unlocked);
+    button.classList.toggle("is-tutorial-locked", tutorialLocked);
     button.classList.toggle("is-active", state.selectedTool === tool && movingDeviceId === null);
     button.setAttribute("aria-pressed", String(state.selectedTool === tool));
     if (tool !== "remove") {
       const cost = button.querySelector<HTMLElement>(".tool-cost");
       if (cost) {
-        cost.textContent = unlocked ? `${DEVICE_COST[tool]} 点` : "未解锁";
+        cost.textContent = !unlocked
+          ? "未解锁"
+          : tutorialLocked
+            ? "教学后可用"
+            : `${DEVICE_COST[tool]} 点`;
       }
     }
   }
+
+  const tutorialPlacement = TUTORIAL_PLACEMENTS[state.tutorialStep];
+  gameRenderer.setTutorialTarget(
+    state.tutorialActive
+      ? tutorialPlacement?.cell ?? TUTORIAL_PLACEMENTS[2].cell
+      : null,
+    state.tutorialActive ? tutorialPlacement?.origin ?? null : null
+  );
 
   updateInspector();
   updatePreview();
@@ -774,8 +862,14 @@ async function toggleSound(): Promise<void> {
 
 hudSoundButton.addEventListener("click", () => void toggleSound());
 menuSoundButton.addEventListener("click", () => void toggleSound());
+skipTutorialButton.addEventListener("click", () => {
+  if (simulation.skipTutorial()) {
+    persistTutorialComplete();
+    updateUi(true);
+  }
+});
 function openHelp(): void {
-  helpPausedGame = simulation.state.phase === "running";
+  helpPausedGame = simulation.state.phase === "running" && !simulation.state.tutorialActive;
   if (helpPausedGame) {
     simulation.togglePause();
   }
@@ -793,8 +887,15 @@ function closeHelp(): void {
 }
 
 mustElement<HTMLButtonElement>("#help-button").addEventListener("click", openHelp);
-mustElement<HTMLButtonElement>("#start-help-button").addEventListener("click", openHelp);
+mustElement<HTMLButtonElement>("#start-help-button").addEventListener("click", () =>
+  startRun(false, true)
+);
 mustElement<HTMLButtonElement>("#close-help-button").addEventListener("click", closeHelp);
+replayTutorialButton.addEventListener("click", () => {
+  helpPausedGame = false;
+  helpOverlay.classList.remove("is-visible");
+  startRun(false, true);
+});
 rerollButton.addEventListener("click", () => {
   if (simulation.rerollRewards()) {
     rewardRenderKey = "";
@@ -827,6 +928,11 @@ document.addEventListener("keydown", (event) => {
     } else {
       openHelp();
     }
+    return;
+  }
+  if (simulation.state.phase === "ready" && event.key.toLowerCase() === "t") {
+    event.preventDefault();
+    startRun(false, true);
     return;
   }
   const toolIndex = Number(event.key) - 1;
@@ -923,6 +1029,8 @@ if (import.meta.env.DEV) {
   window.__pulseDefenseDebug = {
     snapshot: () => ({
       phase: simulation.state.phase,
+      tutorialActive: simulation.state.tutorialActive,
+      tutorialStep: simulation.state.tutorialStep,
       wave: simulation.state.wave,
       elapsed: simulation.state.elapsed,
       coreHp: simulation.state.coreHp,
