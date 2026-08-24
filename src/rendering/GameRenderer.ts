@@ -31,16 +31,21 @@ import {
 } from "../game/types";
 
 const COLORS = {
-  background: 0x0c1215,
-  platform: 0x1b272c,
-  plate: 0x28363b,
-  plateAlt: 0x223137,
-  road: 0x152024,
-  roadEdge: 0x405158,
-  metal: 0x344148,
-  metalDark: 0x182227,
-  cyan: 0x55d8cd,
-  cyanDim: 0x266963,
+  background: 0x080c0e,
+  floor: 0x11181b,
+  platform: 0x263237,
+  platformDark: 0x182125,
+  plate: 0x354449,
+  plateAlt: 0x2d3b40,
+  road: 0x192529,
+  roadEdge: 0x5b6b70,
+  metal: 0x46545a,
+  metalDark: 0x182125,
+  warmMetal: 0x5a4d40,
+  amber: 0xd69b4d,
+  amberDim: 0x6d4c2b,
+  cyan: 0x58c7be,
+  cyanDim: 0x285f5d,
   red: 0xef6b61,
   blue: 0x6e9ee8,
   yellow: 0xe5ba57,
@@ -65,6 +70,17 @@ interface PresentationEnemy {
   group: THREE.Group;
   offset: number;
   speed: number;
+}
+
+interface LaneFlow {
+  curve: THREE.CatmullRomCurve3;
+  markers: THREE.Mesh<THREE.ShapeGeometry, THREE.MeshBasicMaterial>[];
+  laneIndex: number;
+}
+
+interface AmbientBeacon {
+  material: THREE.MeshBasicMaterial;
+  phase: number;
 }
 
 function colorForFrequency(frequency: Frequency): number {
@@ -104,6 +120,7 @@ export class GameRenderer {
   private readonly projectileLayer = new THREE.Group();
   private readonly effectLayer = new THREE.Group();
   private readonly jamLayer = new THREE.Group();
+  private readonly environmentLayer = new THREE.Group();
   private readonly presentationLayer = new THREE.Group();
   private readonly pickPlane: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
   private readonly raycaster = new THREE.Raycaster();
@@ -114,6 +131,10 @@ export class GameRenderer {
   private readonly projectileGroups = new Map<number, THREE.Group>();
   private readonly jamGroups = new Map<number, THREE.Group>();
   private readonly gateGroups: THREE.Group[] = [];
+  private readonly laneFlows: LaneFlow[] = [];
+  private readonly ambientRotors: THREE.Group[] = [];
+  private readonly ambientBeacons: AmbientBeacon[] = [];
+  private readonly dustLayers: THREE.Points[] = [];
   private readonly particles: Particle[] = [];
   private readonly rings: EffectRing[] = [];
   private readonly glowTexture: THREE.CanvasTexture;
@@ -153,9 +174,10 @@ export class GameRenderer {
 
   constructor(private readonly container: HTMLElement) {
     this.scene.background = new THREE.Color(COLORS.background);
-    this.scene.fog = new THREE.FogExp2(COLORS.background, 0.032);
+    this.scene.fog = new THREE.FogExp2(COLORS.background, 0.017);
     this.scene.add(this.world);
     this.world.add(
+      this.environmentLayer,
       this.cableLayer,
       this.deviceLayer,
       this.enemyLayer,
@@ -188,7 +210,7 @@ export class GameRenderer {
     this.renderer.setSize(container.clientWidth, container.clientHeight, false);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.94;
+    this.renderer.toneMappingExposure = 1.05;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.canvas = this.renderer.domElement;
@@ -213,6 +235,7 @@ export class GameRenderer {
 
     this.glowTexture = this.createGlowTexture();
     this.createLighting();
+    this.createEnvironment();
     this.createBoard();
     this.createRoads();
     this.createCore();
@@ -383,6 +406,8 @@ export class GameRenderer {
     this.updatePresentation(now, delta);
     this.updateCore(state, now, delta);
     this.updateGates(state, now, delta);
+    this.updateLaneFlows(state, now);
+    this.updateEnvironment(now, delta);
     this.updateEffects(delta);
     this.updatePreview(now);
     this.updateTutorialMarkers(now);
@@ -395,18 +420,18 @@ export class GameRenderer {
 
     this.updateCamera(delta, now);
     this.bloomPass.strength = this.reducedMotion.matches
-      ? 0.28
+      ? 0.3
       : this.presentationMode
-        ? 0.42
-        : 0.36;
+        ? 0.44
+        : 0.39;
     this.composer.render();
   }
 
   private createLighting(): void {
-    const hemisphere = new THREE.HemisphereLight(0xa9d4d0, 0x101619, 1.15);
+    const hemisphere = new THREE.HemisphereLight(0xb9c9c5, 0x0b1012, 1.48);
     this.scene.add(hemisphere);
 
-    const key = new THREE.DirectionalLight(0xe4f2ef, 2.7);
+    const key = new THREE.DirectionalLight(0xffdfb7, 3.35);
     key.position.set(-5, 13, 7);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
@@ -417,9 +442,203 @@ export class GameRenderer {
     key.shadow.bias = -0.0008;
     this.scene.add(key);
 
-    const rim = new THREE.DirectionalLight(COLORS.cyan, 1.15);
+    const fill = new THREE.DirectionalLight(0x8aa4aa, 0.68);
+    fill.position.set(-8, 5, -9);
+    this.scene.add(fill);
+
+    const rim = new THREE.DirectionalLight(COLORS.cyan, 1.05);
     rim.position.set(9, 7, -8);
     this.scene.add(rim);
+  }
+
+  private createEnvironment(): void {
+    const boardWidth = GRID_WIDTH * CELL_SIZE;
+    const boardDepth = GRID_HEIGHT * CELL_SIZE;
+
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(42, 38),
+      new THREE.MeshStandardMaterial({
+        color: COLORS.floor,
+        roughness: 0.96,
+        metalness: 0.08
+      })
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -1.2;
+    floor.receiveShadow = true;
+    this.environmentLayer.add(floor);
+
+    const floorGlow = new THREE.Mesh(
+      new THREE.CircleGeometry(13.8, 64),
+      new THREE.MeshBasicMaterial({
+        color: 0x29403f,
+        transparent: true,
+        opacity: 0.12,
+        depthWrite: false
+      })
+    );
+    floorGlow.rotation.x = -Math.PI / 2;
+    floorGlow.position.y = -1.17;
+    this.environmentLayer.add(floorGlow);
+
+    const grid = new THREE.GridHelper(38, 38, 0x334044, 0x202a2d);
+    grid.position.y = -1.15;
+    const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
+    for (const material of gridMaterials) {
+      material.transparent = true;
+      material.opacity = 0.34;
+      material.depthWrite = false;
+    }
+    this.environmentLayer.add(grid);
+
+    const foundation = new THREE.Mesh(
+      new RoundedBoxGeometry(boardWidth + 4.7, 0.28, boardDepth + 4.7, 4, 0.24),
+      new THREE.MeshStandardMaterial({
+        color: COLORS.platformDark,
+        roughness: 0.76,
+        metalness: 0.72
+      })
+    );
+    foundation.position.y = -0.99;
+    foundation.receiveShadow = true;
+    this.environmentLayer.add(foundation);
+
+    const serviceDeck = new THREE.Mesh(
+      new RoundedBoxGeometry(boardWidth + 2.7, 0.34, boardDepth + 2.7, 4, 0.2),
+      new THREE.MeshStandardMaterial({
+        color: 0x202b2f,
+        roughness: 0.7,
+        metalness: 0.68
+      })
+    );
+    serviceDeck.position.y = -0.76;
+    serviceDeck.receiveShadow = true;
+    this.environmentLayer.add(serviceDeck);
+
+    const railMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.metal,
+      roughness: 0.34,
+      metalness: 0.9
+    });
+    const hazardMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.warmMetal,
+      emissive: COLORS.amberDim,
+      emissiveIntensity: 0.42,
+      roughness: 0.42,
+      metalness: 0.76
+    });
+    const deckWidth = boardWidth + 2.55;
+    const deckDepth = boardDepth + 2.55;
+    const longRail = new THREE.BoxGeometry(deckWidth, 0.16, 0.11);
+    const shortRail = new THREE.BoxGeometry(0.11, 0.16, deckDepth);
+    for (const z of [-deckDepth / 2, deckDepth / 2]) {
+      const rail = new THREE.Mesh(longRail, railMaterial);
+      rail.position.set(0, -0.55, z);
+      rail.castShadow = true;
+      this.environmentLayer.add(rail);
+    }
+    for (const x of [-deckWidth / 2, deckWidth / 2]) {
+      const rail = new THREE.Mesh(shortRail, railMaterial);
+      rail.position.set(x, -0.55, 0);
+      rail.castShadow = true;
+      this.environmentLayer.add(rail);
+    }
+
+    const hazardBarGeometry = new THREE.BoxGeometry(0.82, 0.04, 0.075);
+    for (const z of [-deckDepth / 2 - 0.01, deckDepth / 2 + 0.01]) {
+      for (let x = -deckWidth / 2 + 0.9; x < deckWidth / 2 - 0.45; x += 2.05) {
+        const bar = new THREE.Mesh(hazardBarGeometry, hazardMaterial);
+        bar.position.set(x, -0.45, z);
+        this.environmentLayer.add(bar);
+      }
+    }
+    for (const x of [-deckWidth / 2 - 0.01, deckWidth / 2 + 0.01]) {
+      for (let z = -deckDepth / 2 + 0.9; z < deckDepth / 2 - 0.45; z += 2.05) {
+        const bar = new THREE.Mesh(hazardBarGeometry, hazardMaterial);
+        bar.rotation.y = Math.PI / 2;
+        bar.position.set(x, -0.45, z);
+        this.environmentLayer.add(bar);
+      }
+    }
+
+    const ventPositions = [
+      [-boardWidth / 2 - 0.82, -boardDepth / 2 - 0.78],
+      [boardWidth / 2 + 0.82, -boardDepth / 2 - 0.78],
+      [-boardWidth / 2 - 0.82, boardDepth / 2 + 0.78],
+      [boardWidth / 2 + 0.82, boardDepth / 2 + 0.78]
+    ] as const;
+    const ventHousingMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.metalDark,
+      roughness: 0.4,
+      metalness: 0.88
+    });
+    for (const [index, [x, z]] of ventPositions.entries()) {
+      const vent = new THREE.Group();
+      vent.position.set(x, -0.48, z);
+      const well = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.48, 0.54, 0.16, 18),
+        ventHousingMaterial
+      );
+      well.receiveShadow = true;
+      vent.add(well);
+      const rim = new THREE.Mesh(
+        new THREE.TorusGeometry(0.44, 0.055, 8, 32),
+        railMaterial
+      );
+      rim.rotation.x = Math.PI / 2;
+      rim.position.y = 0.1;
+      vent.add(rim);
+
+      const rotor = new THREE.Group();
+      rotor.position.y = 0.11;
+      const hub = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.09, 0.12, 0.08, 12),
+        hazardMaterial
+      );
+      rotor.add(hub);
+      for (let bladeIndex = 0; bladeIndex < 3; bladeIndex += 1) {
+        const blade = new THREE.Mesh(
+          new RoundedBoxGeometry(0.12, 0.035, 0.34, 2, 0.025),
+          railMaterial
+        );
+        blade.position.z = 0.2;
+        blade.rotation.y = (bladeIndex / 3) * Math.PI * 2;
+        blade.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), blade.rotation.y);
+        rotor.add(blade);
+      }
+      rotor.userData.speed = (index % 2 === 0 ? 1 : -1) * (0.24 + index * 0.035);
+      this.ambientRotors.push(rotor);
+      vent.add(rotor);
+
+      const lensMaterial = new THREE.MeshBasicMaterial({
+        color: COLORS.amber,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false
+      });
+      const lens = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 7), lensMaterial);
+      lens.position.set(0.34, 0.17, 0.34);
+      vent.add(lens);
+      this.ambientBeacons.push({ material: lensMaterial, phase: index * 1.7 });
+      this.environmentLayer.add(vent);
+    }
+
+    const buttressMaterial = new THREE.MeshStandardMaterial({
+      color: 0x313e43,
+      roughness: 0.55,
+      metalness: 0.8
+    });
+    for (const x of [-5.2, -1.75, 1.75, 5.2]) {
+      for (const z of [-deckDepth / 2 - 0.36, deckDepth / 2 + 0.36]) {
+        const buttress = new THREE.Mesh(
+          new RoundedBoxGeometry(0.78, 0.44, 0.52, 3, 0.08),
+          buttressMaterial
+        );
+        buttress.position.set(x, -0.72, z);
+        buttress.castShadow = true;
+        this.environmentLayer.add(buttress);
+      }
+    }
   }
 
   private createBoard(): void {
@@ -433,8 +652,8 @@ export class GameRenderer {
       ),
       new THREE.MeshStandardMaterial({
         color: COLORS.platform,
-        roughness: 0.82,
-        metalness: 0.6
+        roughness: 0.66,
+        metalness: 0.72
       })
     );
     base.position.y = -0.43;
@@ -443,37 +662,124 @@ export class GameRenderer {
 
     const plateGeometry = new RoundedBoxGeometry(
       CELL_SIZE * 0.91,
-      0.13,
+      0.15,
       CELL_SIZE * 0.91,
       3,
       0.08
     );
+    const plateMaterials = [
+      new THREE.MeshStandardMaterial({
+        color: COLORS.plate,
+        roughness: 0.56,
+        metalness: 0.72
+      }),
+      new THREE.MeshStandardMaterial({
+        color: COLORS.plateAlt,
+        roughness: 0.62,
+        metalness: 0.68
+      }),
+      new THREE.MeshStandardMaterial({
+        color: 0x39494d,
+        roughness: 0.52,
+        metalness: 0.75
+      })
+    ];
+    const roadPlateMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.road,
+      roughness: 0.84,
+      metalness: 0.48
+    });
     for (let y = 0; y < GRID_HEIGHT; y += 1) {
       for (let x = 0; x < GRID_WIDTH; x += 1) {
         const road = isRoadCell({ x, y });
         const plate = new THREE.Mesh(
           plateGeometry,
-          new THREE.MeshStandardMaterial({
-            color: road
-              ? COLORS.road
-              : (x + y) % 2 === 0
-                ? COLORS.plate
-                : COLORS.plateAlt,
-            roughness: road ? 0.9 : 0.72,
-            metalness: road ? 0.45 : 0.68
-          })
+          road ? roadPlateMaterial : plateMaterials[(x * 5 + y * 3) % plateMaterials.length]
         );
-        const position = cellToWorld({ x, y }, road ? -0.1 : -0.055);
+        const position = cellToWorld({ x, y }, road ? -0.085 : -0.045);
         plate.position.set(position.x, position.y, position.z);
         plate.receiveShadow = true;
         this.world.add(plate);
       }
     }
 
+    const boltGeometry = new THREE.CylinderGeometry(0.025, 0.025, 0.026, 6);
+    const boltMaterial = new THREE.MeshStandardMaterial({
+      color: 0x899396,
+      roughness: 0.28,
+      metalness: 0.96
+    });
+    const boltMesh = new THREE.InstancedMesh(
+      boltGeometry,
+      boltMaterial,
+      GRID_WIDTH * GRID_HEIGHT * 2
+    );
+    const boltMatrix = new THREE.Matrix4();
+    let boltIndex = 0;
+    for (let y = 0; y < GRID_HEIGHT; y += 1) {
+      for (let x = 0; x < GRID_WIDTH; x += 1) {
+        if (isRoadCell({ x, y })) {
+          continue;
+        }
+        const center = cellToWorld({ x, y }, 0.045);
+        const diagonal = (x + y) % 2 === 0 ? 1 : -1;
+        for (const side of [-1, 1]) {
+          boltMatrix.makeTranslation(
+            center.x + side * 0.43,
+            center.y,
+            center.z + side * diagonal * 0.43
+          );
+          boltMesh.setMatrixAt(boltIndex, boltMatrix);
+          boltIndex += 1;
+        }
+      }
+    }
+    boltMesh.count = boltIndex;
+    boltMesh.instanceMatrix.needsUpdate = true;
+    this.world.add(boltMesh);
+
+    const inlayGeometry = new THREE.BoxGeometry(0.38, 0.018, 0.025);
+    const inlayMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.warmMetal,
+      emissive: COLORS.amberDim,
+      emissiveIntensity: 0.18,
+      roughness: 0.44,
+      metalness: 0.78
+    });
+    const inlayMesh = new THREE.InstancedMesh(
+      inlayGeometry,
+      inlayMaterial,
+      GRID_WIDTH * GRID_HEIGHT
+    );
+    let inlayIndex = 0;
+    const inlayMatrix = new THREE.Matrix4();
+    const inlayQuaternion = new THREE.Quaternion();
+    const inlayScale = new THREE.Vector3(1, 1, 1);
+    for (let y = 0; y < GRID_HEIGHT; y += 1) {
+      for (let x = 0; x < GRID_WIDTH; x += 1) {
+        if (isRoadCell({ x, y }) || (x * 7 + y * 11) % 5 !== 0) {
+          continue;
+        }
+        const center = cellToWorld({ x, y }, 0.043);
+        const rotation = (x + y) % 2 === 0 ? 0 : Math.PI / 2;
+        inlayQuaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotation);
+        inlayMatrix.compose(
+          new THREE.Vector3(center.x, center.y, center.z),
+          inlayQuaternion,
+          inlayScale
+        );
+        inlayMesh.setMatrixAt(inlayIndex, inlayMatrix);
+        inlayIndex += 1;
+      }
+    }
+    inlayMesh.count = inlayIndex;
+    inlayMesh.instanceMatrix.needsUpdate = true;
+    this.world.add(inlayMesh);
+
     const borderMaterial = new THREE.MeshStandardMaterial({
       color: COLORS.roadEdge,
       metalness: 0.82,
-      roughness: 0.42
+      roughness: 0.34
     });
     const boardWidth = GRID_WIDTH * CELL_SIZE + 0.55;
     const boardDepth = GRID_HEIGHT * CELL_SIZE + 0.55;
@@ -482,11 +788,13 @@ export class GameRenderer {
     for (const z of [-boardDepth / 2, boardDepth / 2]) {
       const rail = new THREE.Mesh(horizontal, borderMaterial);
       rail.position.set(0, -0.04, z);
+      rail.castShadow = true;
       this.world.add(rail);
     }
     for (const x of [-boardWidth / 2, boardWidth / 2]) {
       const rail = new THREE.Mesh(vertical, borderMaterial);
       rail.position.set(x, -0.04, 0);
+      rail.castShadow = true;
       this.world.add(rail);
     }
   }
@@ -494,11 +802,30 @@ export class GameRenderer {
   private createRoads(): void {
     const roadMaterial = new THREE.MeshStandardMaterial({
       color: COLORS.road,
-      emissive: 0x0d191b,
-      emissiveIntensity: 0.35,
-      roughness: 0.82,
-      metalness: 0.48
+      emissive: 0x132427,
+      emissiveIntensity: 0.28,
+      roughness: 0.74,
+      metalness: 0.56
     });
+    const guideMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.roadEdge,
+      emissive: COLORS.cyanDim,
+      emissiveIntensity: 0.26,
+      roughness: 0.36,
+      metalness: 0.86
+    });
+
+    const arrowShape = new THREE.Shape();
+    arrowShape.moveTo(0, 0.14);
+    arrowShape.lineTo(-0.085, 0.015);
+    arrowShape.lineTo(-0.035, 0.015);
+    arrowShape.lineTo(-0.035, -0.13);
+    arrowShape.lineTo(0.035, -0.13);
+    arrowShape.lineTo(0.035, 0.015);
+    arrowShape.lineTo(0.085, 0.015);
+    arrowShape.closePath();
+    const arrowGeometry = new THREE.ShapeGeometry(arrowShape);
+    arrowGeometry.rotateX(-Math.PI / 2);
 
     for (const [laneIndex, lane] of LANES.entries()) {
       const points = lane.points.map((cell) => {
@@ -514,24 +841,161 @@ export class GameRenderer {
       road.receiveShadow = true;
       this.world.add(road);
 
+      for (const offset of [-0.29, 0.29]) {
+        const guidePoints: THREE.Vector3[] = [];
+        for (let sample = 0; sample <= 48; sample += 1) {
+          const progress = sample / 48;
+          const point = curve.getPointAt(progress);
+          const tangent = curve.getTangentAt(progress).normalize();
+          const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).multiplyScalar(offset);
+          guidePoints.push(point.clone().add(normal).setY(0.085));
+        }
+        const guideCurve = new THREE.CatmullRomCurve3(
+          guidePoints,
+          false,
+          "centripetal",
+          0.16
+        );
+        const guide = new THREE.Mesh(
+          new THREE.TubeGeometry(guideCurve, 72, 0.018, 6, false),
+          guideMaterial
+        );
+        this.world.add(guide);
+      }
+
+      const markers: THREE.Mesh<THREE.ShapeGeometry, THREE.MeshBasicMaterial>[] = [];
+      for (let markerIndex = 0; markerIndex < 8; markerIndex += 1) {
+        const material = new THREE.MeshBasicMaterial({
+          color: COLORS.cyanDim,
+          transparent: true,
+          opacity: 0.16,
+          side: THREE.DoubleSide,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        });
+        const marker = new THREE.Mesh(arrowGeometry, material);
+        marker.position.y = 0.13;
+        marker.userData.offset = markerIndex / 8;
+        markers.push(marker);
+        this.world.add(marker);
+      }
+      this.laneFlows.push({ curve, markers, laneIndex });
+
       const gatePosition = points[0];
       const gate = new THREE.Group();
       gate.position.copy(gatePosition);
-      gate.position.y = 0.16;
+      gate.position.y = 0.1;
+      const startTangent = curve.getTangentAt(0.015).normalize();
+      gate.rotation.y = Math.atan2(startTangent.x, startTangent.z);
+
+      const gateMetalMaterial = new THREE.MeshStandardMaterial({
+        color: COLORS.metal,
+        metalness: 0.9,
+        roughness: 0.3
+      });
+      const gateDarkMaterial = new THREE.MeshStandardMaterial({
+        color: COLORS.metalDark,
+        metalness: 0.84,
+        roughness: 0.42
+      });
+      const dock = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.7, 0.76, 0.15, 16),
+        gateDarkMaterial
+      );
+      dock.position.y = -0.06;
+      dock.receiveShadow = true;
+      gate.add(dock);
+
+      const aperture = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.39, 0.43, 0.08, 24),
+        new THREE.MeshStandardMaterial({
+          color: 0x0d1518,
+          emissive: 0x152628,
+          emissiveIntensity: 0.22,
+          metalness: 0.3,
+          roughness: 0.76
+        })
+      );
+      aperture.position.y = 0.035;
+      gate.add(aperture);
+
       const ringMaterial = new THREE.MeshStandardMaterial({
         color: COLORS.roadEdge,
         emissive: COLORS.cyanDim,
-        emissiveIntensity: 0.25,
+        emissiveIntensity: 0.2,
         metalness: 0.88,
         roughness: 0.28
       });
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.08, 10, 32), ringMaterial);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.53, 0.075, 10, 36), ringMaterial);
       ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.08;
       gate.add(ring);
+      const innerRingMaterial = new THREE.MeshStandardMaterial({
+        color: COLORS.warmMetal,
+        emissive: COLORS.amberDim,
+        emissiveIntensity: 0.36,
+        metalness: 0.82,
+        roughness: 0.32
+      });
+      const innerRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.38, 0.032, 8, 32),
+        innerRingMaterial
+      );
+      innerRing.rotation.x = Math.PI / 2;
+      innerRing.position.y = 0.12;
+      gate.add(innerRing);
+
+      const rotor = new THREE.Group();
+      rotor.position.y = 0.12;
+      const toothGeometry = new RoundedBoxGeometry(0.19, 0.075, 0.085, 2, 0.02);
+      for (let toothIndex = 0; toothIndex < 6; toothIndex += 1) {
+        const angle = (toothIndex / 6) * Math.PI * 2;
+        const tooth = new THREE.Mesh(toothGeometry, gateMetalMaterial);
+        tooth.position.set(Math.cos(angle) * 0.55, 0, Math.sin(angle) * 0.55);
+        tooth.rotation.y = -angle;
+        rotor.add(tooth);
+      }
+      gate.add(rotor);
+
+      const lensMaterials: THREE.MeshBasicMaterial[] = [];
+      for (const side of [-1, 1]) {
+        const pylon = new THREE.Mesh(
+          new RoundedBoxGeometry(0.18, 0.6, 0.24, 3, 0.05),
+          gateMetalMaterial
+        );
+        pylon.position.set(side * 0.72, 0.24, 0.02);
+        pylon.castShadow = true;
+        gate.add(pylon);
+
+        const cap = new THREE.Mesh(
+          new RoundedBoxGeometry(0.26, 0.12, 0.32, 3, 0.045),
+          gateDarkMaterial
+        );
+        cap.position.set(side * 0.72, 0.58, 0.02);
+        gate.add(cap);
+
+        const lensMaterial = new THREE.MeshBasicMaterial({
+          color: COLORS.amber,
+          transparent: true,
+          opacity: 0.46,
+          depthWrite: false
+        });
+        const lens = new THREE.Mesh(
+          new THREE.BoxGeometry(0.1, 0.055, 0.255),
+          lensMaterial
+        );
+        lens.position.set(side * 0.72, 0.63, -0.01);
+        gate.add(lens);
+        lensMaterials.push(lensMaterial);
+      }
+
       const light = new THREE.PointLight(COLORS.cyan, 0, 3);
-      light.position.y = 0.42;
+      light.position.y = 0.48;
       gate.add(light);
       gate.userData.ring = ring;
+      gate.userData.innerRing = innerRing;
+      gate.userData.rotor = rotor;
+      gate.userData.lensMaterials = lensMaterials;
       gate.userData.light = light;
       gate.userData.impact = 0;
       gate.userData.lane = laneIndex;
@@ -754,32 +1218,40 @@ export class GameRenderer {
   }
 
   private createBackgroundDust(): void {
-    const count = 260;
-    const positions = new Float32Array(count * 3);
     let seed = 0x73ab31;
     const random = (): number => {
       seed = (seed * 1664525 + 1013904223) >>> 0;
       return seed / 0xffffffff;
     };
-    for (let index = 0; index < count; index += 1) {
-      positions[index * 3] = (random() - 0.5) * 30;
-      positions[index * 3 + 1] = random() * 8 + 0.5;
-      positions[index * 3 + 2] = (random() - 0.5) * 30;
+    const layers = [
+      { count: 280, color: 0x8ba39f, size: 0.028, opacity: 0.3, height: 8.5 },
+      { count: 90, color: COLORS.amber, size: 0.038, opacity: 0.18, height: 3.4 }
+    ] as const;
+    for (const [layerIndex, layer] of layers.entries()) {
+      const positions = new Float32Array(layer.count * 3);
+      for (let index = 0; index < layer.count; index += 1) {
+        positions[index * 3] = (random() - 0.5) * 32;
+        positions[index * 3 + 1] = random() * layer.height + 0.35;
+        positions[index * 3 + 2] = (random() - 0.5) * 32;
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      const points = new THREE.Points(
+        geometry,
+        new THREE.PointsMaterial({
+          color: layer.color,
+          size: layer.size,
+          transparent: true,
+          opacity: layer.opacity,
+          depthWrite: false
+        })
+      );
+      points.userData.dust = true;
+      points.userData.speed = layerIndex === 0 ? 0.004 : -0.007;
+      points.userData.baseY = layerIndex * 0.18;
+      this.dustLayers.push(points);
+      this.scene.add(points);
     }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    const points = new THREE.Points(
-      geometry,
-      new THREE.PointsMaterial({
-        color: 0x7aa39f,
-        size: 0.025,
-        transparent: true,
-        opacity: 0.26,
-        depthWrite: false
-      })
-    );
-    points.userData.dust = true;
-    this.scene.add(points);
   }
 
   private createEffectPools(): void {
@@ -978,11 +1450,22 @@ export class GameRenderer {
     const powerMaterial = new THREE.MeshStandardMaterial({
       color: COLORS.cyan,
       emissive: COLORS.cyan,
-      emissiveIntensity: 0.9,
+      emissiveIntensity: 0.78,
       metalness: 0.52,
       roughness: 0.25
     });
     (group.userData.powerMaterials as THREE.MeshStandardMaterial[]).push(powerMaterial);
+
+    const footRingMaterial = powerMaterial.clone();
+    footRingMaterial.emissiveIntensity = 0.52;
+    (group.userData.powerMaterials as THREE.MeshStandardMaterial[]).push(footRingMaterial);
+    const footRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.29, 0.016, 7, 28),
+      footRingMaterial
+    );
+    footRing.rotation.x = Math.PI / 2;
+    footRing.position.y = 0.195;
+    group.add(footRing);
 
     if (device.kind === "wire") {
       const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.17, 0.12, 12), powerMaterial);
@@ -1085,6 +1568,11 @@ export class GameRenderer {
     powerMaterial: THREE.MeshStandardMaterial,
     baseMaterial: THREE.MeshStandardMaterial
   ): void {
+    const shellMaterial = new THREE.MeshStandardMaterial({
+      color: COLORS.metal,
+      metalness: 0.86,
+      roughness: 0.32
+    });
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.26, 0.38, 12), baseMaterial);
     stem.position.y = 0.37;
     stem.castShadow = true;
@@ -1098,22 +1586,28 @@ export class GameRenderer {
     if (kind === "needle") {
       const body = new THREE.Mesh(
         new RoundedBoxGeometry(0.38, 0.23, 0.42, 3, 0.07),
-        powerMaterial
+        shellMaterial
       );
       body.castShadow = true;
       head.add(body);
-      const barrelMaterial = powerMaterial.clone();
       const barrels = new THREE.Group();
       for (const offset of [-0.09, 0.09]) {
         const barrel = new THREE.Mesh(
           new THREE.CylinderGeometry(0.025, 0.035, 0.46, 8),
-          barrelMaterial
+          shellMaterial
         );
         barrel.rotation.x = Math.PI / 2;
         barrel.position.set(offset, 0, -0.31);
         barrels.add(barrel);
       }
       head.add(barrels);
+      const sight = new THREE.Mesh(
+        new RoundedBoxGeometry(0.2, 0.04, 0.3, 2, 0.015),
+        powerMaterial
+      );
+      sight.position.y = 0.135;
+      sight.position.z = -0.035;
+      head.add(sight);
     } else if (kind === "mortar") {
       const cradle = new THREE.Mesh(
         new RoundedBoxGeometry(0.48, 0.28, 0.42, 3, 0.08),
@@ -1122,12 +1616,19 @@ export class GameRenderer {
       head.add(cradle);
       const barrel = new THREE.Mesh(
         new THREE.CylinderGeometry(0.1, 0.15, 0.55, 14),
-        powerMaterial
+        shellMaterial
       );
       barrel.rotation.x = Math.PI / 3.2;
       barrel.position.set(0, 0.2, -0.12);
       barrel.castShadow = true;
       head.add(barrel);
+      const muzzle = new THREE.Mesh(
+        new THREE.TorusGeometry(0.105, 0.022, 7, 18),
+        powerMaterial
+      );
+      muzzle.rotation.x = Math.PI / 3.2;
+      muzzle.position.set(0, 0.43, -0.27);
+      head.add(muzzle);
     } else {
       const prism = new THREE.Mesh(new THREE.OctahedronGeometry(0.31, 0), powerMaterial);
       prism.rotation.z = Math.PI / 4;
@@ -1665,20 +2166,80 @@ export class GameRenderer {
     for (const [index, gate] of this.gateGroups.entries()) {
       const active = state.activeLanes.includes(index) && state.phase !== "ready";
       const ring = gate.userData.ring as THREE.Mesh<THREE.TorusGeometry, THREE.MeshStandardMaterial>;
+      const innerRing = gate.userData.innerRing as THREE.Mesh<
+        THREE.TorusGeometry,
+        THREE.MeshStandardMaterial
+      >;
+      const rotor = gate.userData.rotor as THREE.Group;
+      const lensMaterials = gate.userData.lensMaterials as THREE.MeshBasicMaterial[];
       const light = gate.userData.light as THREE.PointLight;
       gate.userData.impact = Math.max(0, (gate.userData.impact as number) - delta * 1.8);
       const impact = gate.userData.impact as number;
       ring.material.emissiveIntensity = active
-        ? 0.75 + Math.sin(now * 5 + index) * 0.2 + impact
-        : 0.08;
+        ? 0.72 + Math.sin(now * 5 + index) * 0.18 + impact
+        : 0.16;
       ring.material.emissive.setHex(active ? COLORS.red : COLORS.cyanDim);
-      light.color.setHex(active ? COLORS.red : COLORS.cyan);
-      light.intensity = active ? 1.1 + impact * 2 : 0;
+      innerRing.material.emissive.setHex(active ? COLORS.red : COLORS.amberDim);
+      innerRing.material.emissiveIntensity = active
+        ? 0.78 + Math.sin(now * 7 + index) * 0.18
+        : 0.28;
+      for (const [lensIndex, material] of lensMaterials.entries()) {
+        material.color.setHex(active ? COLORS.red : COLORS.amber);
+        material.opacity = active
+          ? 0.5 + Math.sin(now * 7 + lensIndex * Math.PI + index) * 0.34
+          : 0.32 + Math.sin(now * 2.2 + index) * 0.08;
+      }
+      light.color.setHex(active ? COLORS.red : COLORS.amber);
+      light.intensity = active ? 1.25 + impact * 2 : 0.22;
       const scale = 1 + impact * 0.35;
       gate.scale.setScalar(scale);
-      if (active && !this.reducedMotion.matches) {
-        ring.rotation.z += delta * 0.45;
+      if (!this.reducedMotion.matches) {
+        rotor.rotation.y += delta * (active ? 1.5 : 0.26);
+        innerRing.rotation.z -= delta * (active ? 0.8 : 0.16);
       }
+    }
+  }
+
+  private updateLaneFlows(state: GameState, now: number): void {
+    const motionTime = this.reducedMotion.matches ? 0 : now;
+    for (const flow of this.laneFlows) {
+      const active =
+        (this.presentationMode && flow.laneIndex === 2) ||
+        (state.phase !== "ready" && state.activeLanes.includes(flow.laneIndex));
+      const speed = active ? 0.105 : 0.025;
+      for (const [markerIndex, marker] of flow.markers.entries()) {
+        const offset = marker.userData.offset as number;
+        const progress = 0.025 + ((offset + motionTime * speed) % 1) * 0.94;
+        const point = flow.curve.getPointAt(progress);
+        const tangent = flow.curve.getTangentAt(progress).normalize();
+        marker.position.set(point.x, 0.13, point.z);
+        marker.rotation.y = Math.atan2(tangent.x, tangent.z) + Math.PI;
+        marker.material.color.setHex(active ? COLORS.amber : COLORS.cyanDim);
+        const wave = this.reducedMotion.matches
+          ? 0.5
+          : 0.5 + Math.sin(now * 5.5 - markerIndex * 0.75) * 0.5;
+        marker.material.opacity = active ? 0.48 + wave * 0.34 : 0.09 + wave * 0.08;
+        const scale = active ? 0.9 + wave * 0.2 : 0.82;
+        marker.scale.setScalar(scale);
+      }
+    }
+  }
+
+  private updateEnvironment(now: number, delta: number): void {
+    if (!this.reducedMotion.matches) {
+      for (const rotor of this.ambientRotors) {
+        rotor.rotation.y += delta * (rotor.userData.speed as number);
+      }
+      for (const dust of this.dustLayers) {
+        dust.rotation.y = now * (dust.userData.speed as number);
+        dust.position.y =
+          (dust.userData.baseY as number) + Math.sin(now * 0.16 + dust.userData.speed * 40) * 0.08;
+      }
+    }
+    for (const beacon of this.ambientBeacons) {
+      beacon.material.opacity = this.reducedMotion.matches
+        ? 0.48
+        : 0.36 + (Math.sin(now * 1.8 + beacon.phase) * 0.5 + 0.5) * 0.34;
     }
   }
 
@@ -1788,7 +2349,7 @@ export class GameRenderer {
     this.camera.zoom = expLerp(this.camera.zoom, targetZoom, 7.5, delta);
     this.camera.updateProjectionMatrix();
     this.flash = Math.max(0, this.flash - delta * 2.2);
-    this.renderer.toneMappingExposure = 0.94 + this.presentationBlend * 0.03 + this.flash * 0.1;
+    this.renderer.toneMappingExposure = 1.04 + this.presentationBlend * 0.035 + this.flash * 0.1;
   }
 
   private spawnParticles(
